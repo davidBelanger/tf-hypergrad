@@ -7,24 +7,24 @@ import os
 tf.set_random_seed(42)
 
 #this is a basic linear model: noise ~ N(0,std),y ~ x*w + noise
-class regression_problem():
+class RegressionProblem():
     def __init__(self,config):
 
         self.dimension = config.dimension #dimension of x
         self.batchsize = config.batchsize #minibatch size during training
         self.stdev = config.stdev #noise variance in ground truth linear model. 
 
-        self.doConditioning = True #if we make the problem too easy, then optimization will be quite robust. 
+        self.do_conditioning = True #if we make the problem too easy, then optimization will be quite robust. 
         #For regression, the computational complexity of optimization on the train set, and the error on the test set, depend on the condition number of X'X
         #Therefore, to make good hyperparameter optimization more necessary, we (optionally) force the problem to be poorly conditioned
 
         self.input_placeholder = tf.placeholder('float',[self.batchsize,self.dimension],name='input',)
         self.true_params = [tf.Variable(numpy.random.randn(1,self.dimension).astype('float32'),name='true_params',trainable=False)] #parameters that the ground truth is generated with respect to
-        self.initParams = [tf.zeros([1,self.dimension],name = 'regression_weights')] #initial guess for linear model parameters to learn
-        #not that self.initParams does not contain the actual parameters that are learned (hence why it's not a tf.Variable above). 
+        self.init_params = [tf.zeros([1,self.dimension],name = 'regression_weights')] #initial guess for linear model parameters to learn
+        #not that self.init_params does not contain the actual parameters that are learned (hence why it's not a tf.Variable above). 
         #The output of learn(), which essentially implements SGD learning as an RNN, is the learned parameters
        
-        if(self.doConditioning):
+        if(self.do_conditioning):
             d = numpy.random.rand(self.dimension)
             d[0] = 0.001 # to make it especially poorly conditioned, manually make one of the eigenvalues very small. 
             self.diag = numpy.diag(d)
@@ -32,19 +32,19 @@ class regression_problem():
             self.conditioning_matrix = self.orth_matrix*self.diag #this yields a warping of the space that will yield poorly-conditioned x. 
        
         #the train data is randomly sampled at each SGD step, but the dev and test sets are constant
-        self.dev_data = tf.constant(self.condition(numpy.random.randn(10*self.batchsize,self.dimension)).astype('float32'))
-        self.test_data = tf.constant(self.condition(numpy.random.randn(10*self.batchsize,self.dimension)).astype('float32'))
+        self.dev_data = tf.constant(self.transform(numpy.random.randn(10*self.batchsize,self.dimension)).astype('float32'))
+        self.test_data = tf.constant(self.transform(numpy.random.randn(10*self.batchsize,self.dimension)).astype('float32'))
 
     #this warps the data with the conditioning matrix
-    def condition(self,mat):
-        if(self.doConditioning):
+    def transform(self,mat):
+        if(self.do_conditioning):
             return numpy.dot(mat,self.conditioning_matrix)
         else:
             return mat
 
     #this generates a random batch of x variables for training            
     def gen_example(self): 
-        return self.condition(numpy.random.randn(self.batchsize,self.dimension))
+        return self.transform(numpy.random.randn(self.batchsize,self.dimension))
 
     #this predicts a batch of y, given a batch of x
     def predict(self,data,weights):
@@ -82,38 +82,38 @@ def main():
     if not os.path.exists(config.log_dir):
         os.makedirs(config.log_dir)
 
-    problem = regression_problem(config)
+    problem = RegressionProblem(config)
 
     #This function performs SGD learning on the train set
     #It does SGD with momentum for fixed budget of numSteps gradient steps. It learns a separate learning rate for each step
-    def learn(initialLr,gamma,initParams):
+    def learn(initialLr,gamma,init_params):
         #initalLR: initial guess for the value of the learned per-iteration learning rate
         #gamma: momentum decay term
-        #initParams: initial guess for the model parameters
+        #init_params: initial guess for the model parameters
 
-        curParams = initParams
-        learningRates = []
+        cur_params = init_params
+        learning_rates = []
         velocities = None
 
         for i in range(config.num_train_steps):
             lr_i = tf.Variable(initialLr,name='lr-{}'.format(i))
-            learningRates.append(lr_i)
+            learning_rates.append(lr_i)
             data = problem.input_placeholder
             truth = problem.generate(data,problem.true_params) #can't pull this out of the loop because it might be a different data subsample every time
-            prediction = problem.predict(data,curParams)
+            prediction = problem.predict(data,cur_params)
             op_loss = tf.reduce_mean(tf.square(prediction - truth),name='train-loss-{}'.format(i))
-            grads = tf.gradients(op_loss, curParams,name='learning-grad-{}'.format(i))
+            grads = tf.gradients(op_loss, cur_params,name='learning-grad-{}'.format(i))
             if(not velocities):
                 velocities = [tf.zeros_like(grad) for grad in grads]
             velocities = [gamma*v - (1- gamma)*g for (v,g) in zip(velocities,grads)]
-            curParams = [(p + lr_i*v) for p,v in zip(curParams,velocities)]
+            cur_params = [(p + lr_i*v) for p,v in zip(cur_params,velocities)]
 
-        return curParams, learningRates
+        return cur_params, learning_rates
 
     #This evaluates the error on the a dataset
-    def evaluate(curParams, data,name):
+    def evaluate(cur_params, data,name):
         truth = problem.generate(data,problem.true_params)
-        prediction = problem.predict(data,curParams)
+        prediction = problem.predict(data,cur_params)
         op_loss = tf.reduce_mean(tf.square(prediction - truth),name = name)
         return op_loss    
 
@@ -124,10 +124,10 @@ def main():
         gamma = config.init_gamma
 
     #this is the overall model. First, you learn on the train set, and then you evaluate on the dev set
-    learnedParams, learningRates = learn(config.init_lr,gamma,problem.initParams)
-    hyper_loss = evaluate(learnedParams, problem.dev_data,'dev-loss')
+    learned_params, learning_rates = learn(config.init_lr,gamma,problem.init_params)
+    hyper_loss = evaluate(learned_params, problem.dev_data,'dev-loss')
 
-    tvars = [] + learningRates
+    tvars = [] + learning_rates
     if(config.learn_gamma):
          tvars.append(gamma)
     
@@ -137,7 +137,7 @@ def main():
     op_optimize = optimizer.apply_gradients(zip(grads, tvars))
 
     #during the outer loop of learning our hyperparameters, we'll also evaluate our model on the test data
-    op_evaluate = evaluate(learnedParams,problem.test_data,'test-loss')
+    op_evaluate = evaluate(learned_params,problem.test_data,'test-loss')
 
     dev_loss_summary = tf.scalar_summary('dev-loss',hyper_loss)
     test_loss_summary = tf.scalar_summary('test-loss',op_evaluate)
@@ -157,7 +157,7 @@ def main():
             print("%s: %s" % (iteration, error)) #this is the error on the test data
         
         #log the final learned learning rates and momentum parameter
-        final_lrs = session.run(learningRates)
+        final_lrs = session.run(learning_rates)
         logVector(sw,final_lrs,session,'learning-rates')
         if(config.learn_gamma):
             sw.add_summary(session.run(gamma_summary),0)
